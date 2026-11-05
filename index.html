@@ -1,0 +1,785 @@
+<html><head><script data-od-srcdoc-transport-activation>(function(){
+  var generation = "";
+  var bodyComplete = false;
+  function containsCompletionMarker(node){
+    if (!node || node.nodeType !== 1) return false;
+    if (node.tagName === 'TEMPLATE' && node.getAttribute('data-od-srcdoc-transport-body-complete') === generation) return true;
+    var candidates = node.querySelectorAll ? node.querySelectorAll('template[data-od-srcdoc-transport-body-complete]') : [];
+    for (var i = 0; i < candidates.length; i += 1) {
+      if (candidates[i].getAttribute('data-od-srcdoc-transport-body-complete') === generation) return true;
+    }
+    return false;
+  }
+  var completionObserver = typeof MutationObserver === 'function' ? new MutationObserver(function(records){
+    if (bodyComplete) return;
+    for (var i = 0; i < records.length; i += 1) {
+      var added = records[i].addedNodes || [];
+      for (var j = 0; j < added.length; j += 1) {
+        if (!containsCompletionMarker(added[j])) continue;
+        bodyComplete = true;
+        completionObserver.disconnect();
+        return;
+      }
+    }
+  }) : null;
+  if (completionObserver && document.documentElement) {
+    completionObserver.observe(document.documentElement, { childList: true, subtree: true });
+  }
+  function announceReady(probeId){
+    if (!generation) return;
+    try {
+      if (window.parent && window.parent !== window) {
+        var message = { type: 'od:srcdoc-transport-activated', generation: generation };
+        if (typeof probeId === 'string' && probeId) message.probeId = probeId;
+        message.bodyComplete = bodyComplete;
+        message.documentReadyState = document.readyState;
+        message.bodyPresent = !!document.body;
+        message.bodyChildCount = document.body ? document.body.children.length : 0;
+        message.documentElementChildCount = document.documentElement ? document.documentElement.children.length : 0;
+        window.parent.postMessage(message, '*');
+      }
+    } catch (_) { /* sandboxed parent */ }
+  }
+  window.addEventListener('message', function(ev){
+    var data = ev && ev.data;
+    if (data && data.type === 'od:srcdoc-transport-ready-probe') {
+      if (data.generation === generation) announceReady(data.probeId);
+      return;
+    }
+    if (!data || data.type !== 'od:srcdoc-transport-activate' || typeof data.html !== 'string' || typeof data.generation !== 'string' || !data.generation) return;
+    // document.open/write keeps the current Window realm. Re-running an
+    // authored classic script there can fail before execution when it declares
+    // a top-level let/const that the previous document already declared. Ask
+    // the host to remount the shared bootstrap so this generation gets a fresh
+    // realm, then let the one-shot shell perform the initial write.
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({
+          type: 'od:srcdoc-transport-reset-required',
+          generation: data.generation
+        }, '*');
+      }
+    } catch (_) { /* sandboxed parent — host recovery will remount on timeout */ }
+  });
+  announceReady();
+})();</script><script data-od-preview-redirect-guard>(function(){
+  var NAME_PREFIX = '__odRedirectGuard=';
+  var MAX_HOPS = 15;
+  var WINDOW_MS = 4000;
+  var SELF_MIN_DELAY_MS = 2000;
+  var MESSAGE_TYPE = "od:redirect-loop-blocked";
+  var BLOCK_LOAD_TIME_SCRIPT_REDIRECT = false;
+  function nowMs(){ try { return Date.now(); } catch (_) { return 0; } }
+  function readState(){
+    try {
+      var raw = window.name;
+      if (typeof raw === 'string' && raw.indexOf(NAME_PREFIX) === 0) {
+        var parsed = JSON.parse(raw.slice(NAME_PREFIX.length));
+        if (parsed && typeof parsed.hops === 'number' && typeof parsed.windowStart === 'number') return parsed;
+      }
+    } catch (_) {}
+    return null;
+  }
+  function writeState(state){
+    try { window.name = NAME_PREFIX + JSON.stringify({ hops: state.hops, windowStart: state.windowStart }); } catch (_) {}
+  }
+  function clearState(){
+    try { if (typeof window.name === 'string' && window.name.indexOf(NAME_PREFIX) === 0) window.name = ''; } catch (_) {}
+  }
+  function nextState(){
+    var t = nowMs();
+    var prev = readState();
+    var withinWindow = prev && (t - prev.windowStart) <= WINDOW_MS;
+    return { hops: (withinWindow ? prev.hops : 0) + 1, windowStart: withinWindow ? prev.windowStart : t };
+  }
+  function scheduleCandidateReset(state){
+    try {
+      if (typeof setTimeout !== 'function') return;
+      setTimeout(function(){
+        try {
+          var current = readState();
+          if (current && current.hops === state.hops && current.windowStart === state.windowStart) clearState();
+        } catch (_) {}
+      }, WINDOW_MS + 1);
+    } catch (_) {}
+  }
+  function recordScriptRedirectCandidate(){
+    if (!BLOCK_LOAD_TIME_SCRIPT_REDIRECT) return;
+    var state = nextState();
+    if (state.hops > MAX_HOPS) {
+      clearState();
+      report(state.hops);
+      return;
+    }
+    writeState(state);
+    scheduleCandidateReset(state);
+  }
+  function metaRefreshes(){
+    var out = [];
+    try {
+      var metas = document.getElementsByTagName('meta');
+      for (var i = 0; i < metas.length; i++) {
+        var equiv = metas[i].getAttribute ? metas[i].getAttribute('http-equiv') : null;
+        if (equiv && String(equiv).toLowerCase() === 'refresh') out.push(metas[i]);
+      }
+    } catch (_) {}
+    return out;
+  }
+  function parseContent(meta){
+    var content = '';
+    try { content = String(meta.getAttribute('content') || ''); } catch (_) {}
+    var delayMatch = content.match(/^\s*([0-9]+(?:\.[0-9]+)?)/);
+    var delayMs = delayMatch ? Math.round(parseFloat(delayMatch[1]) * 1000) : 0;
+    var urlMatch = content.match(/[;,]\s*url\s*=\s*['"]?\s*([^'"\s]+)/i);
+    return { delayMs: delayMs, url: urlMatch ? urlMatch[1] : '' };
+  }
+  function currentArtifactHref(){
+    try {
+      var href = String(location.href || '');
+      if (href === 'about:srcdoc') {
+        return String(document.baseURI || href);
+      }
+      return href;
+    } catch (_) {
+      return '';
+    }
+  }
+  function isSelfTarget(url){
+    if (!url) return true; // no url => refresh the current document
+    try {
+      var base = (document.baseURI) || location.href;
+      return new URL(url, base).href === currentArtifactHref();
+    } catch (_) { return false; }
+  }
+  function isFastSrcdocUrlHop(parsed){
+    if (!parsed.url || parsed.delayMs > SELF_MIN_DELAY_MS) return false;
+    try { return String(location.href || '') === 'about:srcdoc'; } catch (_) { return false; }
+  }
+  function neutralize(metas){
+    for (var i = 0; i < metas.length; i++) {
+      try { metas[i].parentNode && metas[i].parentNode.removeChild(metas[i]); } catch (_) {}
+    }
+    try { if (window.stop) window.stop(); } catch (_) {}
+  }
+  function report(hops){
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: MESSAGE_TYPE, hops: hops }, '*');
+      }
+    } catch (_) {}
+  }
+  function evaluate(){
+    var metas = metaRefreshes();
+    if (!metas.length) {
+      // No refresh directive: this document breaks any accumulating chain.
+      if (!BLOCK_LOAD_TIME_SCRIPT_REDIRECT) clearState();
+      return;
+    }
+    var selfLoop = false;
+    for (var i = 0; i < metas.length; i++) {
+      var parsed = parseContent(metas[i]);
+      if (parsed.delayMs <= SELF_MIN_DELAY_MS && isSelfTarget(parsed.url)) { selfLoop = true; break; }
+      if (isFastSrcdocUrlHop(parsed)) { selfLoop = true; break; }
+    }
+    var state = nextState();
+    if (selfLoop || state.hops > MAX_HOPS) {
+      neutralize(metas);
+      clearState();
+      report(state.hops);
+      return;
+    }
+    writeState(state);
+  }
+  recordScriptRedirectCandidate();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', evaluate);
+  } else {
+    evaluate();
+  }
+})();</script><script data-od-sandbox-shim>(function(){
+  function makeStore(){
+    var data = {};
+    var api = {
+      getItem: function(k){ return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
+      setItem: function(k, v){ data[k] = String(v); },
+      removeItem: function(k){ delete data[k]; },
+      clear: function(){ data = {}; },
+      key: function(i){ return Object.keys(data)[i] || null; }
+    };
+    Object.defineProperty(api, 'length', { get: function(){ return Object.keys(data).length; } });
+    return api;
+  }
+  function tryShim(name){
+    var works = false;
+    try { works = !!window[name] && typeof window[name].getItem === 'function'; void window[name].length; }
+    catch (_) { works = false; }
+    if (works) return;
+    try { Object.defineProperty(window, name, { configurable: true, value: makeStore() }); }
+    catch (_) { try { window[name] = makeStore(); } catch (__) {} }
+  }
+  tryShim('localStorage');
+  tryShim('sessionStorage');
+  // A <base href> pointing at the artifact's real /raw/ URL (injectBaseHref,
+  // below) is what lets relative asset paths resolve inside this opaque
+  // srcDoc document. That same base is what breaks history.pushState /
+  // replaceState: a bare-hash call like replaceState(null, '', '#/3') — the
+  // exact pattern generated decks use for their own slide routing — resolves
+  // against the <base> into a real http(s) URL, and the browser throws
+  // SecurityError because the DOCUMENT's own origin is the opaque "null" of
+  // about:srcdoc, which can never match a concrete origin. A deck whose own
+  // navigation function calls replaceState before it finishes updating the
+  // slide DOM (ordering varies by generated template) aborts mid-navigation
+  // on that throw, leaving the main canvas blank until a manual reload —
+  // the thumbnail rail is unaffected because it does not run the deck's
+  // script per-thumbnail. Wrap both methods so that failure degrades to a
+  // no-op instead of interrupting the caller: the iframe's address bar was
+  // never visible to the user anyway, so losing the hash update here is
+  // invisible.
+  function shimHistoryMethod(name){
+    try {
+      var h = window.history;
+      var original = h && h[name];
+      if (typeof original !== 'function') return;
+      h[name] = function(state, title, url){
+        try {
+          return original.call(h, state, title, url);
+        } catch (_) {
+          return undefined;
+        }
+      };
+    } catch (_) {}
+  }
+  shimHistoryMethod('pushState');
+  shimHistoryMethod('replaceState');
+  document.addEventListener('click', (e) => {
+    if (!e.target || !(e.target instanceof Element)) return;
+    var link = e.target.closest('a[href]');
+    if (!link) return;
+    var href = link.getAttribute('href');
+    if (href === null) return;
+    var isAnchor = href.startsWith('#') || href === '';
+    if (isAnchor) {
+      e.preventDefault();
+      if (href === '' || href === '#') {
+        window.scrollTo({ top: 0 });
+        history.replaceState(null, '', ' ');
+      } else {
+        var targetId = href.slice(1);
+        var target = targetId ? document.getElementById(targetId) : null;
+        if (target) {
+          target.scrollIntoView();
+          location.hash === href && history.replaceState(null, '', ' ');
+          location.hash = href;
+        }
+      }
+    } else if (link.getAttribute('target') === '_blank') {
+      e.preventDefault();
+      let safe = false;
+      try {
+        var url = new URL(href, location.href);
+        safe =
+          url.protocol === 'http:' ||
+          url.protocol === 'https:' ||
+          url.protocol === 'mailto:';
+      } catch (_) {}
+      safe && window.open(href, '_blank', 'noopener,noreferrer');
+    }
+  });
+})();</script><script data-od-download-gate="">(function yEe(){document.addEventListener("click",async e=>{let t=e.target?.closest?.("a[download]");if(t){e.preventDefault();try{let n=new URL(t.href,document.baseURI),i=new URL(document.baseURI);if(!["data:","blob:"].includes(n.protocol)&&!(n.origin===i.origin&&n.pathname.startsWith(i.pathname)))return;if(!["data:","blob:"].includes(n.protocol)){parent.postMessage({type:"od:download-request",name:t.download||"download",url:n.href},"*");return}let a=await fetch(n.href);if(!a.ok)return;let r=await a.blob();if(r.size>12*1024*1024)return;parent.postMessage({type:"od:download-request",name:t.download||"download",blob:r},"*")}catch{}}},!0)})();</script><meta name="viewport" content="width=device-width"><title>kWh Meter</title><style>body{font:15px system-ui;max-width:850px;margin:auto;padding:24px;background:#f5f7f2;color:#202820}h1{font-size:clamp(36px,6vw,58px);letter-spacing:-.06em}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{padding:22px;border:1px solid #d5ddd2;border-radius:10px;background:#fff}.result{background:#202820;color:#fff}.f{margin:14px 0}.f label{display:block;font-size:12px;font-weight:bold;margin-bottom:5px}.in{display:flex;border:1px solid #ccd5c9;border-radius:6px}.in input,.in select{width:100%;border:0;padding:10px;background:none;font:inherit}.unit{font-size:12px;color:#6c776e;padding:10px}.cost{font-size:clamp(38px,6vw,62px);font-weight:bold;color:#d4f66b}.muted,small{color:#aebaae;font-size:12px}.rows{margin-top:25px;border-top:1px solid #ffffff30}.row{display:flex;justify-content:space-between;padding:11px 0;border-bottom:1px solid #ffffff20}.bar{height:8px;background:#435045;margin-top:24px}.bar i{display:block;height:100%;background:#d4f66b}@media(max-width:650px){.grid{grid-template-columns:1fr}}</style><style data-od-tweaks-bridge-style>
+[data-od-tweaks-hidden] .tw-panel {
+  transform: translateX(calc(100% + 32px)) !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+.tw-restore { display: none !important; }
+</style><script data-od-tweaks-bridge>(function(){
+  // Synchronously hide BEFORE the artifact body parses so the panel never
+  // flashes on initial paint. The host removes the attribute via postMessage
+  // once it knows the desired state.
+  document.documentElement.setAttribute('data-od-tweaks-hidden', '');
+
+  var suppressEcho = false;
+  var observer = null;
+
+  function panelEl(){ return document.querySelector('.tw-panel'); }
+
+  function applyClassesToPanel(visible){
+    var panel = panelEl();
+    if (panel) panel.classList.toggle('tw-hidden', !visible);
+  }
+
+  function setPanelVisible(visible){
+    suppressEcho = true;
+    document.documentElement.toggleAttribute('data-od-tweaks-hidden', !visible);
+    applyClassesToPanel(visible);
+    // Clear flag after the MutationObserver has had a chance to fire for this
+    // change so we don't echo our own host-driven toggles back to the host.
+    Promise.resolve().then(function(){ suppressEcho = false; });
+  }
+
+  function postState(){
+    var panel = panelEl();
+    if (!panel) return;
+    try {
+      parent.postMessage({
+        type: 'od:tweaks-panel-state',
+        visible: !panel.classList.contains('tw-hidden'),
+      }, '*');
+    } catch (e) {}
+  }
+
+  function postAvailability(){
+    try {
+      parent.postMessage({
+        type: 'od:tweaks-available',
+        available: !!panelEl(),
+      }, '*');
+    } catch (e) {}
+  }
+
+  function attachObserver(){
+    var panel = panelEl();
+    if (!panel || observer) return;
+    observer = new MutationObserver(function(){
+      if (suppressEcho) return;
+      postState();
+    });
+    observer.observe(panel, { attributes: true, attributeFilter: ['class'] });
+  }
+
+  function onReady(){
+    // Capture the panel authored visibility BEFORE we apply the host hidden
+    // attribute. The bridge sets data-od-tweaks-hidden synchronously in head
+    // (before the body parses), so on entry to onReady the attribute is
+    // always present even though the artifact may have authored the panel
+    // as default-visible. Reading the panel class first is the only place
+    // we can still observe the author intent. Then drive the attribute,
+    // classes, and posted state from that captured value so a default
+    // visible tw-panel reports visible:true and the toolbar toggle starts
+    // ON. Issue surfaced in PR #1643 review.
+    var panel = panelEl();
+    var initialVisible = !!panel && !panel.classList.contains('tw-hidden');
+    document.documentElement.toggleAttribute('data-od-tweaks-hidden', !initialVisible);
+    applyClassesToPanel(initialVisible);
+    attachObserver();
+    postAvailability();
+    // Post the captured initial visibility so the toolbar toggle reflects
+    // the default state on mount. Without this the toggle reads OFF while
+    // a default-visible tw-panel artifact clearly shows its panel and the
+    // user would have to click toggle-on then toggle-off to actually hide.
+    postState();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', onReady);
+  } else {
+    onReady();
+  }
+
+  window.addEventListener('message', function(ev){
+    if (!ev.data || ev.data.type !== 'od:tweaks-panel-visible') return;
+    setPanelVisible(!!ev.data.visible);
+  });
+})();</script></head><body><h2 data-od-id="path-0">kWh Meter</h2><p>Estimasi pemakaian listrik rumah.</p><h1 data-od-id="path-2">Hitung pemakaian listrik.</h1><main class="grid" data-od-id="path-3"><section class="card" data-od-id="path-3-0"><b>Data input</b><div class="f" data-od-id="path-3-0-1"><label>Daya perangkat</label><div class="in"><input id="w" type="number" value="15" data-od-id="path-3-0-1-1-0"><span class="unit">Watt</span></div></div><div class="f" data-od-id="path-3-0-2"><label>Durasi per hari</label><div class="in"><input id="h" type="number" value="8" data-od-id="path-3-0-2-1-0"><span class="unit">jam</span></div></div><div class="f" data-od-id="path-3-0-3"><label>Periode</label><div class="in"><input id="d" type="number" value="30" data-od-id="path-3-0-3-1-0"><span class="unit">hari</span></div></div><div class="f" data-od-id="path-3-0-4"><label>Daya listrik rumah</label><div class="in"><select id="v" data-od-id="path-3-0-4-1-0"><option value="1352">450 VA</option><option value="1444.7">900 VA</option><option value="1444.7" selected="">1.300 VA</option><option value="1444.7">2.200 VA</option><option value="1699.53">3.500 VA</option><option value="1699.53">5.500 VA</option><option value="1699.53">6.600 VA</option></select></div></div><div class="f" data-od-id="path-3-0-5"><label>Tarif manual</label><div class="in"><input id="t" type="number" value="1444.7" data-od-id="path-3-0-5-1-0"><span class="unit">Rp/kWh</span></div></div><small>Pilihan VA adalah referensi. Tarif manual dapat diubah.</small></section><section class="card result" data-od-id="path-3-1"><b>Hasil perhitungan</b><p class="muted">Total estimasi biaya</p><div class="cost" id="c" data-od-id="path-3-1-2">Rp 5.201</div><div class="muted" id="s" data-od-id="path-3-1-3">3,60 kWh / 30 hari</div><div class="rows" data-od-id="path-3-1-4"><div class="row"><span>Total energi</span><b id="k" data-od-id="path-3-1-4-0-1">3,60 kWh</b></div><div class="row"><span>Tarif</span><b id="r" data-od-id="path-3-1-4-1-1">Rp 1.445/kWh</b></div><div class="row"><span>Rata-rata harian</span><b id="x" data-od-id="path-3-1-4-2-1">0,12 kWh</b></div></div><div class="bar" data-od-id="path-3-1-5"><i id="b" data-od-id="path-3-1-5-0"></i></div><p class="muted">Rumus: (Watt × jam × hari) ÷ 1.000 × tarif.</p></section></main><button id="z" data-od-id="path-4">Reset contoh</button><script>q=x=>document.getElementById(x);rp=n=>new Intl.NumberFormat('id-ID',{style:'currency',currency:'IDR',maximumFractionDigits:0}).format(n);dc=n=>n.toLocaleString('id-ID',{minimumFractionDigits:2,maximumFractionDigits:2});function go(){let w=+q('w').value||0,h=+q('h').value||0,d=+q('d').value||1,r=+q('t').value||+q('v').value,k=w*h*d/1e3;q('c').textContent=rp(k*r);q('s').textContent=dc(k)+' kWh / '+d+' hari';q('k').textContent=dc(k)+' kWh';q('r').textContent=rp(r)+'/kWh';q('x').textContent=dc(k/d)+' kWh';q('b').style.width=Math.min(100,Math.max(4,w/22))+'%'}['w','h','d','v','t'].forEach(x=>q(x).oninput=go);q('v').onchange=()=>{q('t').value=q('v').value;go()};q('z').onclick=()=>{w.value=15;h.value=8;d.value=30;t.value=1444.7;go()};go()</script><script data-od-preview-content-size-bridge>(function(){
+  if (window.__odPreviewContentSizeBridge) return;
+  window.__odPreviewContentSizeBridge = true;
+  var pending = false;
+  var lastRequest = null;
+  var documentEpoch = "";
+  function measure(){
+    var root = document.documentElement;
+    var body = document.body || root;
+    if (!root) return null;
+    var scrollValues = [
+      root.scrollWidth,
+      body && body.scrollWidth,
+    ];
+    var clientValues = [
+      root.clientWidth,
+      body && body.clientWidth
+    ];
+    var scrollWidth = 0;
+    var clientWidth = 0;
+    for (var i = 0; i < scrollValues.length; i += 1) {
+      var nextScroll = Number(scrollValues[i] || 0);
+      if (Number.isFinite(nextScroll) && nextScroll > scrollWidth) scrollWidth = nextScroll;
+    }
+    for (var j = 0; j < clientValues.length; j += 1) {
+      var nextClient = Number(clientValues[j] || 0);
+      if (Number.isFinite(nextClient) && nextClient > clientWidth) clientWidth = nextClient;
+    }
+    return {
+      scrollWidth: scrollWidth > 0 ? Math.ceil(scrollWidth) : null,
+      clientWidth: clientWidth > 0 ? Math.ceil(clientWidth) : null
+    };
+  }
+  function post(){
+    if (!lastRequest) return;
+    var size = measure();
+    try {
+      window.parent.postMessage({
+        type: 'od:preview-content-size',
+        measurementId: lastRequest.measurementId,
+        generation: lastRequest.generation,
+        documentEpoch: documentEpoch,
+        scrollWidth: size && size.scrollWidth,
+        clientWidth: size && size.clientWidth
+      }, '*');
+    } catch (_) {}
+  }
+  function schedule(){
+    if (pending) return;
+    pending = true;
+    window.requestAnimationFrame(function(){
+      pending = false;
+      post();
+    });
+  }
+  window.addEventListener('message', function(ev){
+    var data = ev && ev.data;
+    if (!data || data.type !== 'od:preview-content-size-request') return;
+    if (typeof data.measurementId !== 'string' || typeof data.generation !== 'string') return;
+    lastRequest = {
+      measurementId: data.measurementId,
+      generation: data.generation
+    };
+    schedule();
+  });
+  window.addEventListener('resize', schedule);
+  if (typeof ResizeObserver !== 'undefined') {
+    try {
+      var observer = new ResizeObserver(schedule);
+      observer.observe(document.documentElement);
+      if (document.body) observer.observe(document.body);
+    } catch (_) {}
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', schedule);
+  } else {
+    setTimeout(schedule, 0);
+  }
+  setTimeout(schedule, 80);
+  setTimeout(schedule, 260);
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(schedule).catch(function(){});
+  }
+})();</script><script data-od-snapshot-bridge>(function(){
+  var SNAPSHOT_STYLE_PROPS = [
+    'display','position','box-sizing','width','height','min-width','max-width','min-height','max-height',
+    'margin','margin-top','margin-right','margin-bottom','margin-left',
+    'padding','padding-top','padding-right','padding-bottom','padding-left',
+    'border','border-top','border-right','border-bottom','border-left','border-radius',
+    'font','font-family','font-size','font-weight','font-style','line-height','letter-spacing',
+    'color','background-color','visibility','opacity','transform','transform-origin','overflow','overflow-x','overflow-y',
+    'white-space','text-align','vertical-align','object-fit','object-position',
+    'flex','flex-direction','flex-wrap','flex-grow','flex-shrink','flex-basis',
+    'grid','grid-template-columns','grid-template-rows','grid-column','grid-row',
+    'gap','row-gap','column-gap','align-items','align-content','align-self',
+    'justify-items','justify-content','justify-self','inset','top','right','bottom','left',
+    'z-index','box-shadow','text-shadow'
+  ];
+  function copyComputedStyle(source, target){
+    if (!source || !target || source.nodeType !== 1 || target.nodeType !== 1) return;
+    var computed = window.getComputedStyle(source);
+    var style = target.getAttribute('style') || '';
+    for (var i = 0; i < SNAPSHOT_STYLE_PROPS.length; i++){
+      var prop = SNAPSHOT_STYLE_PROPS[i];
+      var value = computed.getPropertyValue(prop);
+      if (value) style += prop + ':' + value + ';';
+    }
+    target.setAttribute('style', style);
+  }
+  function syncElementState(source, target){
+    var tag = source.tagName ? source.tagName.toLowerCase() : '';
+    if (tag === 'img' && source.currentSrc) target.setAttribute('src', source.currentSrc);
+    if (tag === 'input' || tag === 'textarea') target.setAttribute('value', source.value || '');
+    if (tag === 'canvas') {
+      try {
+        var img = document.createElement('img');
+        img.setAttribute('src', source.toDataURL('image/png'));
+        img.setAttribute('style', target.getAttribute('style') || '');
+        target.parentNode && target.parentNode.replaceChild(img, target);
+      } catch (_) {}
+    }
+  }
+  function inlineSnapshotStyles(originalRoot, cloneRoot){
+    copyComputedStyle(originalRoot, cloneRoot);
+    syncElementState(originalRoot, cloneRoot);
+    var originals = originalRoot.querySelectorAll('*');
+    var clones = cloneRoot.querySelectorAll('*');
+    var count = Math.min(originals.length, clones.length, 3500);
+    for (var i = 0; i < count; i++){
+      copyComputedStyle(originals[i], clones[i]);
+      syncElementState(originals[i], clones[i]);
+    }
+  }
+  // Must run AFTER pruneHiddenSnapshotNodes: prune pairs originalRoot/cloneRoot
+  // querySelectorAll('*') lists by index, so removing clone nodes (scripts,
+  // links) before it shifts every later clone under the wrong original and the
+  // misdirected removals can delete the visible content (or the body itself),
+  // yielding a uniform "empty-render" frame.
+  function stripSnapshotResources(cloneRoot){
+    var scripts = cloneRoot.querySelectorAll('script');
+    for (var s = scripts.length - 1; s >= 0; s--) scripts[s].remove();
+    var links = cloneRoot.querySelectorAll('link[rel~="stylesheet"], link[rel~="preload"], link[rel~="preconnect"]');
+    for (var l = links.length - 1; l >= 0; l--) links[l].remove();
+    var styles = cloneRoot.querySelectorAll('style');
+    for (var st = 0; st < styles.length; st++) {
+      styles[st].textContent = (styles[st].textContent || '')
+        .replace(/@import[^;]+;/gi, '')
+        .replace(/@font-face\s*\{[^}]*\}/gi, '');
+    }
+    // HTML tolerates attribute names XML rejects (@click, :href, {shorthand}).
+    // One such attribute anywhere makes the whole foreignObject SVG unparseable,
+    // so drop any attribute whose name is not a valid XML Name.
+    var XML_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*(?::[A-Za-z_][A-Za-z0-9_.-]*)?$/;
+    var all = cloneRoot.querySelectorAll('*');
+    for (var e = 0; e < all.length; e++) {
+      var attrs = all[e].attributes;
+      for (var a = attrs.length - 1; a >= 0; a--) {
+        if (!XML_NAME.test(attrs[a].name)) all[e].removeAttribute(attrs[a].name);
+      }
+    }
+  }
+  // innerHTML uses the HTML serializer, which emits void elements (<br>, <img>)
+  // without self-closing slashes — invalid XML, so the foreignObject SVG image
+  // fails to parse (img.onerror → 'snapshot image failed'). XMLSerializer emits
+  // well-formed XHTML instead.
+  function serializeSnapshotXhtml(node){
+    try {
+      var serializer = new XMLSerializer();
+      var out = '';
+      for (var i = 0; i < node.childNodes.length; i++) out += serializer.serializeToString(node.childNodes[i]);
+      return out;
+    } catch (_) { return node.innerHTML || ''; }
+  }
+  function pruneHiddenSnapshotNodes(originalRoot, cloneRoot){
+    var originals = originalRoot.querySelectorAll('*');
+    var clones = cloneRoot.querySelectorAll('*');
+    var count = Math.min(originals.length, clones.length);
+    var removals = [];
+    for (var i = 0; i < count; i++){
+      var original = originals[i];
+      var clone = clones[i];
+      if (!original || !clone || !clone.parentNode) continue;
+      var computed = window.getComputedStyle(original);
+      if (computed && (computed.display === 'none' || computed.visibility === 'hidden')) {
+        removals.push(clone);
+      }
+    }
+    for (var r = removals.length - 1; r >= 0; r--){
+      if (removals[r].parentNode) removals[r].parentNode.removeChild(removals[r]);
+    }
+  }
+  function waitForImages(){
+    var imgs = Array.prototype.slice.call(document.images || []);
+    return Promise.all(imgs.map(function(img){
+      if (img.complete) return Promise.resolve();
+      return new Promise(function(resolve){
+        img.addEventListener('load', resolve, { once: true });
+        img.addEventListener('error', resolve, { once: true });
+      });
+    }));
+  }
+  function scrollOffset(){
+    var doc = document.documentElement;
+    var body = document.body;
+    return {
+      x: Math.max(window.scrollX || 0, doc ? doc.scrollLeft || 0 : 0, body ? body.scrollLeft || 0 : 0),
+      y: Math.max(window.scrollY || 0, doc ? doc.scrollTop || 0 : 0, body ? body.scrollTop || 0 : 0)
+    };
+  }
+  function escapeAttribute(value){
+    return String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  }
+  function snapshotBackgroundColor(){
+    try {
+      var probe = window.getComputedStyle(document.body || document.documentElement);
+      var bg = probe && probe.backgroundColor || '';
+      if (!bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') return '#ffffff';
+      return bg;
+    } catch (_) { return '#ffffff'; }
+  }
+  // After painting, sample the canvas: a uniform (single-color) bitmap means
+  // the foreignObject rasterizer painted nothing — Chromium frequently refuses
+  // to paint <foreignObject> HTML loaded via <img>. Treating that as an honest
+  // 'empty-render' error (instead of shipping the background-only frame) lets
+  // the host fall back / surface a real failure rather than a silent black PNG.
+  function canvasLooksBlank(ctx, cw, ch){
+    try {
+      var data = ctx.getImageData(0, 0, cw, ch).data;
+      var step = Math.max(4, Math.floor((cw * ch) / 4096)) * 4;
+      var first = null, samples = 0;
+      for (var i = 0; i + 3 < data.length; i += step){
+        samples++;
+        if (!first){ first = [data[i], data[i+1], data[i+2], data[i+3]]; continue; }
+        if (Math.abs(data[i]-first[0]) > 6 || Math.abs(data[i+1]-first[1]) > 6 ||
+            Math.abs(data[i+2]-first[2]) > 6 || Math.abs(data[i+3]-first[3]) > 6) return false;
+      }
+      return samples > 8;
+    } catch (_) { return false; }
+  }
+  // Rasterize the current view (or the whole document, when opts.full) via an
+  // SVG <foreignObject>. Returns a Promise so it can be reused by both the
+  // od:snapshot message handler AND the export-capture bridge (image export /
+  // PDF) — the foreignObject path is fast and never blocks on external
+  // image network loads the way a DOM-cloning rasterizer does.
+  function captureSnapshot(opts){
+    opts = opts || {};
+    return new Promise(function(resolve, reject){
+      var w = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
+      var h = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
+      var dpr = window.devicePixelRatio || 1;
+      var bgColor = snapshotBackgroundColor();
+      var docW = Math.max(w, document.documentElement.scrollWidth || 0, document.body ? document.body.scrollWidth : 0);
+      var docH = Math.max(h, document.documentElement.scrollHeight || 0, document.body ? document.body.scrollHeight : 0);
+      var full = !!opts.full;
+      var capW = full ? docW : w;
+      var capH = full ? docH : h;
+      var clone = document.documentElement.cloneNode(true);
+      clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+      inlineSnapshotStyles(document.documentElement, clone);
+      // Styles preserve hidden nodes; pruning after script removal mismatches DOM indexes.
+      stripSnapshotResources(clone);
+      var scroll = full ? { x: 0, y: 0 } : scrollOffset();
+      var cloneBody = clone.querySelector('body');
+      var rootStyle = clone.getAttribute('style') || '';
+      var bodyStyle = cloneBody ? cloneBody.getAttribute('style') || '' : '';
+      var bodyContent = serializeSnapshotXhtml(cloneBody || clone);
+      var wrapperStyle = rootStyle + bodyStyle +
+        'margin:0;position:relative;left:' + (-scroll.x) + 'px;top:' + (-scroll.y) + 'px;' +
+        'width:' + docW + 'px;height:' + docH + 'px;overflow:visible;';
+      var html = '<div xmlns="http://www.w3.org/1999/xhtml" style="' + escapeAttribute(wrapperStyle) + '">' + bodyContent + '</div>';
+      var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + capW + '" height="' + capH + '" viewBox="0 0 ' + capW + ' ' + capH + '">' +
+        '<foreignObject x="0" y="0" width="' + docW + '" height="' + docH + '">' +
+        html +
+        '</foreignObject></svg>';
+      var img = new Image();
+      img.onload = function(){
+        try {
+          var canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.floor(capW * dpr));
+          canvas.height = Math.max(1, Math.floor(capH * dpr));
+          var ctx = canvas.getContext('2d');
+          if (!ctx) throw new Error('no 2d context');
+          ctx.scale(dpr, dpr);
+          // Opaque base so a transparent (un-painted) raster never flattens to
+          // pure black in clipboards / PNG viewers.
+          ctx.fillStyle = bgColor;
+          ctx.fillRect(0, 0, capW, capH);
+          ctx.drawImage(img, 0, 0, capW, capH);
+          if (canvasLooksBlank(ctx, canvas.width, canvas.height)) {
+            reject(new Error('empty-render'));
+            return;
+          }
+          resolve({ dataUrl: canvas.toDataURL('image/png'), w: canvas.width, h: canvas.height });
+        } catch (err) {
+          reject(err instanceof Error ? err : new Error(String(err && err.message || err)));
+        }
+      };
+      img.onerror = function(){ reject(new Error('snapshot image failed')); };
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+    });
+  }
+  // Exposed so the export-capture bridge (same document) can reuse this renderer.
+  window.__odCaptureSnapshot = function(opts){
+    return waitForImages().then(function(){ return captureSnapshot(opts || {}); });
+  };
+  window.addEventListener('message', function(ev){
+    var data = ev && ev.data;
+    if (!data || data.type !== 'od:snapshot' || !data.id) return;
+    window.__odCaptureSnapshot({ full: !!data.full }).then(function(res){
+      window.parent.postMessage({ type: 'od:snapshot:result', id: String(data.id), dataUrl: res.dataUrl, w: res.w, h: res.h }, '*');
+    }, function(err){
+      window.parent.postMessage({ type: 'od:snapshot:result', id: String(data.id), error: String(err && err.message || err) }, '*');
+    });
+  });
+})();</script><script data-od-export-capture-bridge>(function(){
+  function raf(){ return new Promise(function(r){ requestAnimationFrame(function(){ r(); }); }); }
+  function settle(){
+    var fonts = (document.fonts && document.fonts.ready) ? document.fonts.ready.catch(function(){}) : Promise.resolve();
+    var imgs = Promise.all(Array.prototype.slice.call(document.images||[]).map(function(img){
+      if (img.complete) return Promise.resolve();
+      return new Promise(function(r){ img.addEventListener('load', r, {once:true}); img.addEventListener('error', r, {once:true}); });
+    }));
+    return Promise.all([fonts, imgs]).then(raf).then(raf);
+  }
+  function deckState(){
+    try { if (typeof window.__odDeckSlideState === 'function') return window.__odDeckSlideState(); } catch(_){}
+    return { active: 0, count: 1 };
+  }
+  function navTo(index, delay){
+    return new Promise(function(resolve){
+      try { window.postMessage({ type:'od:slide', action:'go', index: index }, '*'); } catch(_){}
+      var tries = 0;
+      function check(){
+        tries++;
+        if (deckState().active === index || tries > 14) { resolve(); return; }
+        setTimeout(check, 80);
+      }
+      setTimeout(check, Math.max(60, delay||0));
+    });
+  }
+  function captureImage(deck){
+    // Reuse the shared SVG-foreignObject renderer (injectSnapshotBridge). For a
+    // deck the active slide fills the viewport, so a viewport capture IS the
+    // slide; a non-deck page captures the full document.
+    if (typeof window.__odCaptureSnapshot !== 'function') {
+      return Promise.reject(new Error('snapshot renderer unavailable'));
+    }
+    return window.__odCaptureSnapshot({ full: !deck });
+  }
+  function notes(){
+    var el = document.getElementById('speaker-notes');
+    if (el) {
+      var t = el.textContent || '';
+      try { var j = JSON.parse(t); if (Array.isArray(j)) return j; } catch(_){}
+      var plain = t.replace(/\s+/g,' ').trim();
+      if (plain) return plain;
+    }
+    var list = [];
+    // Match every .slide in document order — per-slide notes must line up
+    // 1:1 with the slide list regardless of the deck's container nesting.
+    var slideNodes = document.querySelectorAll('.slide');
+    for (var i = 0; i < slideNodes.length; i++) {
+      var noteEl = slideNodes[i].querySelector('.notes');
+      list.push(noteEl ? (noteEl.textContent || '').replace(/\s+/g, ' ').trim() : '');
+    }
+    return list.length ? list : '';
+  }
+  function send(msg){ try { window.parent.postMessage(msg, '*'); } catch(_){} }
+  function run(req){
+    var id = req.id;
+    var deck = !!req.deck;
+    var single = !!req.single;
+    var delay = req.delay || 350;
+    Promise.resolve().then(function(){
+      var st = deckState();
+      var total = (!single && deck && st.count > 1) ? st.count : 1;
+      var notesAll = notes();
+      function noteFor(i){ return Array.isArray(notesAll) ? (notesAll[i]||'') : (i===0 ? notesAll : ''); }
+      var idx = 0;
+      function step(){
+        if (idx >= total){ send({ type:'od:export-capture:done', id:id, total: total }); return; }
+        var i = idx;
+        var navP = (!single && deck && total > 1) ? navTo(i, delay) : Promise.resolve();
+        navP.then(settle).then(function(){
+          try {
+            captureImage(deck).then(function(img){
+              send({ type:'od:export-capture:slide', id:id, index:i, total:total, dataUrl: img.dataUrl, w: img.w, h: img.h, notes: noteFor(i) });
+              idx++; setTimeout(step, 0);
+            }).catch(function(err){ send({ type:'od:export-capture:error', id:id, error: String(err && err.message || err) }); });
+          } catch(err){ send({ type:'od:export-capture:error', id:id, error: String(err && err.message || err) }); }
+        });
+      }
+      step();
+    }).catch(function(err){
+      send({ type:'od:export-capture:error', id:id, error: String(err && err.message || err) });
+    });
+  }
+  window.addEventListener('message', function(ev){
+    var data = ev && ev.data;
+    if (!data || data.type !== 'od:export-capture' || !data.id) return;
+    run(data);
+  });
+})();</script><template data-od-srcdoc-transport-body-complete=""></template></body></html>
